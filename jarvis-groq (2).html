@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Jarvis</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f4f7fb;--fg:#0c1b2a;--mut:#5a6b7d;--acc:#0a84c6;--card:#e4ecf5;--me:#cfe6f7}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#060d16;--fg:#dff3ff;--mut:#7d93a8;--acc:#27c4ff;--card:#0f1d2c;--me:#12324a}}
+:root[data-theme="dark"]{--bg:#060d16;--fg:#dff3ff;--mut:#7d93a8;--acc:#27c4ff;--card:#0f1d2c;--me:#12324a}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column}
+header{padding:14px 16px 6px;text-align:center;letter-spacing:.35em;font-weight:600;color:var(--acc);font-size:14px}
+#log{flex:1;overflow-y:auto;padding:8px 16px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:86%;padding:10px 14px;border-radius:16px;line-height:1.4;font-size:16px;background:var(--card);align-self:flex-start;white-space:pre-wrap}
+.m.me{align-self:flex-end;background:var(--me)}
+.hint{color:var(--mut);text-align:center;margin:auto;font-size:15px;padding:0 24px}
+#dock{padding:10px 16px 14px;display:flex;flex-direction:column;align-items:center;gap:10px}
+#status{color:var(--mut);font-size:13px;min-height:16px}
+#orb{width:92px;height:92px;border-radius:50%;border:2px solid var(--acc);background:radial-gradient(circle at 35% 30%,var(--acc),transparent 70%),var(--card);color:var(--fg);font-size:30px;cursor:pointer;transition:transform .2s,box-shadow .2s}
+#orb.on{transform:scale(1.1);box-shadow:0 0 0 8px color-mix(in srgb,var(--acc) 25%,transparent),0 0 30px var(--acc)}
+#row{display:flex;gap:8px;width:100%}
+#txt{flex:1;padding:11px 14px;border-radius:22px;border:1px solid var(--mut);background:var(--card);color:var(--fg);font-size:16px}
+#send{padding:0 16px;border-radius:22px;border:0;background:var(--acc);color:#04121c;font-weight:600;font-size:15px}
+#muteb{background:none;border:0;color:var(--mut);font-size:13px}
+</style>
+</head>
+<body>
+<header>JARVIS</header>
+<div id="log"><div class="hint" id="hint">Tap the orb and talk. Try: “Set a timer for 2 minutes” or “What time is it?”</div></div>
+<div id="dock">
+  <div id="status"></div>
+  <button id="orb" aria-label="Talk">🎙</button>
+  <div id="row"><input id="txt" placeholder="Or type here…" autocomplete="off"><button id="send">Send</button></div>
+  <div><button id="muteb">Voice replies: on</button> <button id="keyb" style="background:none;border:0;color:var(--mut);font-size:13px">Change API key</button></div>
+</div>
+<script>
+const log=document.getElementById('log'),st=document.getElementById('status'),orb=document.getElementById('orb'),txt=document.getElementById('txt');
+let hist=[],busy=false,voiceOn=true,rec=null,listening=false;
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+const PERSONA="You are Jarvis, a witty, concise, polite AI butler-style voice assistant. Reply in 1-3 short spoken-friendly sentences, no markdown or lists. Use tools when relevant (time, timers, opening phone apps). Address the user as “sir” or “ma’am” only occasionally.";
+
+function add(t,me){const h=document.getElementById('hint');if(h)h.remove();const d=document.createElement('div');d.className='m'+(me?' me':'');d.textContent=t;log.appendChild(d);log.scrollTop=log.scrollHeight;return d}
+function speak(t){if(!voiceOn||!window.speechSynthesis)return;speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.rate=1.02;speechSynthesis.speak(u)}
+
+const tools=[
+ {name:"get_time",description:"Get the user's current local date and time.",inputSchema:{type:"object",properties:{}},execute:()=>new Date().toLocaleString()},
+ {name:"set_timer",description:"Start a countdown timer. The page will announce when it finishes.",inputSchema:{type:"object",properties:{seconds:{type:"number"},label:{type:"string"}},required:["seconds"]},
+  execute:({seconds,label})=>{const s=Math.max(1,Math.min(86400,Math.round(seconds)));setTimeout(()=>{const m="Timer done"+(label?": "+label:"")+".";add("⏰ "+m);speak(m);try{navigator.vibrate&&navigator.vibrate([300,100,300])}catch(e){}},s*1000);return "Timer set for "+s+" seconds."}}
+];
+
+const PKGS={whatsapp:"com.whatsapp",spotify:"com.spotify.music",youtube:"com.google.android.youtube",maps:"com.google.android.apps.maps",chrome:"com.android.chrome",gmail:"com.google.android.gm",instagram:"com.instagram.android",tiktok:"com.zhiliaoapp.musically",snapchat:"com.snapchat.android",netflix:"com.netflix.mediaclient",settings:"com.android.settings",roblox:"com.roblox.client",github:"com.github.android",telegram:"org.telegram.messenger",discord:"com.discord"};
+tools.push({name:"open_app",description:"Open an app on the user's Android phone. Known apps: "+Object.keys(PKGS).join(", ")+". For other apps pass the Android package name if you are sure of it.",inputSchema:{type:"object",properties:{app:{type:"string",description:"App name, e.g. Spotify"},package:{type:"string",description:"Optional Android package name"}},required:["app"]},
+ execute:({app,package:p})=>{const pkg=p||PKGS[String(app).toLowerCase().replace(/[^a-z]/g,"")];if(!pkg)return "I don’t know the package for "+app+".";
+  fetch("http://localhost:8080/open?pkg="+encodeURIComponent(pkg),{mode:"no-cors"}).catch(()=>{});return "Opening "+app+"."}});
+
+function getKey(force){let k="";try{k=localStorage.getItem("jarvis_key")||""}catch(e){}
+ if(!k||force){k=(prompt("Paste your Groq API key (stored only on this device):")||"").trim();try{if(k)localStorage.setItem("jarvis_key",k)}catch(e){}}return k}
+let MODEL=null;
+async function pickModel(key){
+ const r=await fetch("https://api.groq.com/openai/v1/models",{headers:{authorization:"Bearer "+key}});
+ if(!r.ok)throw new Error(r.status+" could not list models");
+ const ids=(await r.json()).data.map(m=>m.id);
+ const pref=["openai/gpt-oss-120b","openai/gpt-oss-20b","llama-3.3-70b-versatile","llama-3.1-8b-instant"];
+ for(const p of pref)if(ids.includes(p))return p;
+ const bad=/whisper|guard|tts|orpheus|playai|compound|embed|safeguard|distil/i;
+ const ok=ids.filter(i=>!bad.test(i));
+ if(!ok.length)throw new Error("no chat models available");
+ return ok[0];
+}
+const toolDefs=tools.map(t=>({type:"function",function:{name:t.name,description:t.description,parameters:t.inputSchema}}));
+async function call(key,messages){
+ if(!MODEL)MODEL=await pickModel(key);
+ const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{"content-type":"application/json","authorization":"Bearer "+key},
+  body:JSON.stringify({model:MODEL,max_tokens:500,tools:toolDefs,messages:[{role:"system",content:PERSONA}].concat(messages)})});
+ if(!r.ok){const e=await r.text();throw new Error(r.status+" "+e.slice(0,160))}
+ return r.json();
+}
+async function ask(q){
+ if(busy||!q.trim())return;
+ const key=getKey();if(!key){add("I need an API key to think, sir.");return}
+ busy=true;add(q,true);hist.push({role:"user",content:q});
+ const bub=add("…");st.textContent="Thinking…";
+ try{
+  const msgs=hist.slice();let a="";
+  for(let i=0;i<5;i++){
+   const d=await call(key,msgs);
+   const m=d.choices[0].message;
+   a=(m.content||"").trim();
+   if(!m.tool_calls||!m.tool_calls.length)break;
+   msgs.push({role:"assistant",content:m.content||"",tool_calls:m.tool_calls});
+   for(const c of m.tool_calls){
+    const t=tools.find(x=>x.name===c.function.name);let o="error";
+    try{o=String(t.execute(JSON.parse(c.function.arguments||"{}")))}catch(e){}
+    msgs.push({role:"tool",tool_call_id:c.id,content:o});
+   }
+  }
+  a=a||"Apologies, I have nothing to say.";
+  bub.textContent=a;hist.push({role:"assistant",content:a});speak(a);
+ }catch(e){
+  hist.pop();bub.textContent="Sorry, that failed: "+e.message+" (tap “Change API key” if the key is wrong)";
+ }
+ st.textContent="";busy=false;log.scrollTop=log.scrollHeight;
+}
+
+function listen(){
+ if(!SR){st.textContent="Voice input isn’t supported here. Type instead.";return}
+ if(listening){rec&&rec.stop();return}
+ if(window.speechSynthesis)speechSynthesis.cancel();
+ rec=new SR();rec.lang=navigator.language||"en-US";rec.interimResults=true;rec.continuous=false;
+ let final="";
+ rec.onstart=()=>{listening=true;orb.classList.add("on");st.textContent="Listening…"};
+ rec.onresult=e=>{let t="";for(const r of e.results){t+=r[0].transcript;if(r.isFinal)final=t}st.textContent=t};
+ rec.onerror=e=>{st.textContent=e.error==="not-allowed"?"Microphone permission denied.":"Voice error: "+e.error};
+ rec.onend=()=>{listening=false;orb.classList.remove("on");if(final)ask(final);else if(!busy)st.textContent=""};
+ try{rec.start()}catch(e){}
+}
+
+orb.onclick=listen;
+document.getElementById('send').onclick=()=>{const v=txt.value;txt.value="";ask(v)};
+txt.onkeydown=e=>{if(e.key==="Enter"){const v=txt.value;txt.value="";ask(v)}};
+document.getElementById('muteb').onclick=e=>{voiceOn=!voiceOn;e.target.textContent="Voice replies: "+(voiceOn?"on":"off");if(!voiceOn&&window.speechSynthesis)speechSynthesis.cancel()};
+document.getElementById('keyb').onclick=()=>getKey(true);
+</script>
+</body>
+</html>
